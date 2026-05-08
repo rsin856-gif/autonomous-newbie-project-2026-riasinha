@@ -1,3 +1,4 @@
+# Improve controller safety logic
 # controller.py
 #
 # Faulty decision logic for the 2026 Autonomous Newbie Project.
@@ -18,6 +19,26 @@
 # Therefore:
 # - positive lane_offset_m means vehicle is right of center, so LEFT is corrective
 # - positive heading_error_deg means vehicle points right of desired direction, so LEFT is corrective
+
+
+
+
+# my updated logic:
+# 1. If sensor invalid --> STOP
+# 2. If e_stop --> STOP
+# 3. If obstacle dangerously close:
+#       - if no clear path --> STOP
+#       - if one side clear --> steer there + SLOW
+#       - if both clear --> choose safer correction + SLOW
+# 4. If obstacle moderately close:
+#       - be cautious + SLOW
+# 5. If lane/heading error is large:
+#       - correct + SLOW
+# 6. If lane/heading error is mild:
+#       - correct + maybe ACCELERATE/SLOW depending speed
+# 7. Else:
+#       - STRAIGHT + ACCELERATE
+
 
 VALID_STEERING = {"LEFT", "RIGHT", "STRAIGHT"}
 VALID_SPEED = {"ACCELERATE", "SLOW", "STOP"}
@@ -55,89 +76,93 @@ def controller(
 
     HIGH_SPEED_MPS = 3.0
 
-    centered = abs(lane_offset_m) <= MILD_OFFSET_M
-    small_heading_error = abs(heading_error_deg) <= MILD_HEADING_DEG
+    # P controller constant
+    Kp = 1.0
 
-    steering = "STRAIGHT"
-    speed_action = "ACCELERATE"
+    ERROR_DEADBAND = 3.0
+    LARGE_CONTROL_OUTPUT = 15.0
 
+    # combine heading error and lane offset into one error score
+    error_score = heading_error_deg + (lane_offset_m * 20)
+
+    # SAFETY CHECKS
     if not sensor_valid:
         return "STRAIGHT", "STOP"
 
-    if centered and small_heading_error:
-        steering = "STRAIGHT"
-        speed_action = "ACCELERATE"
+    if e_stop:
+        return "STRAIGHT", "STOP"
 
-    elif speed_mps >= HIGH_SPEED_MPS:
-        if heading_error_deg > LARGE_HEADING_DEG or lane_offset_m > LARGE_OFFSET_M:
-            steering = "LEFT"
-            speed_action = "SLOW"
+    # OBSTACLE CHECKS
+    if obstacle_distance_m <= DANGER_OBSTACLE_M:
 
-        elif heading_error_deg < -LARGE_HEADING_DEG or lane_offset_m < -LARGE_OFFSET_M:
-            steering = "RIGHT"
-            speed_action = "SLOW"
-
-    elif obstacle_distance_m <= DANGER_OBSTACLE_M:
         if not left_clear and not right_clear:
-            steering = "STRAIGHT"
-            speed_action = "STOP"
-
-        elif left_clear and not right_clear:
-            steering = "LEFT"
-            speed_action = "SLOW"
+            return "STRAIGHT", "STOP"
 
         elif right_clear and not left_clear:
-            steering = "RIGHT"
-            speed_action = "SLOW"
+            return "RIGHT", "SLOW"
 
-        elif heading_error_deg > MILD_HEADING_DEG or lane_offset_m > MILD_OFFSET_M:
-            steering = "LEFT"
-            speed_action = "SLOW"
+        elif left_clear and not right_clear:
+            return "LEFT", "SLOW"
 
-        elif heading_error_deg < -MILD_HEADING_DEG or lane_offset_m < -MILD_OFFSET_M:
-            steering = "RIGHT"
-            speed_action = "SLOW"
-
-        else:
-            steering = "LEFT"
-            speed_action = "SLOW"
+        elif left_clear and right_clear:
+            if error_score > ERROR_DEADBAND:
+                return "LEFT", "SLOW"
+            elif error_score < -ERROR_DEADBAND:
+                return "RIGHT", "SLOW"
+            else:
+                return "STRAIGHT", "STOP"
 
     elif obstacle_distance_m <= CAUTION_OBSTACLE_M:
-        if not left_clear and not right_clear:
-            steering = "STRAIGHT"
-            speed_action = "STOP"
 
-        elif left_clear and not right_clear:
-            steering = "LEFT"
-            speed_action = "SLOW"
+        if not left_clear and not right_clear:
+            return "STRAIGHT", "STOP"
 
         elif right_clear and not left_clear:
-            steering = "RIGHT"
-            speed_action = "SLOW"
+            return "RIGHT", "SLOW"
 
-        elif heading_error_deg > MILD_HEADING_DEG or lane_offset_m > MILD_OFFSET_M:
-            steering = "LEFT"
-            speed_action = "SLOW"
+        elif left_clear and not right_clear:
+            return "LEFT", "SLOW"
 
-        elif heading_error_deg < -MILD_HEADING_DEG or lane_offset_m < -MILD_OFFSET_M:
-            steering = "RIGHT"
-            speed_action = "SLOW"
+        elif left_clear and right_clear:
+            if error_score > ERROR_DEADBAND:
+                return "LEFT", "SLOW"
+            elif error_score < -ERROR_DEADBAND:
+                return "RIGHT", "SLOW"
+            else:
+                return "STRAIGHT", "SLOW"
 
+    # P CONTROLLER
+    control_output = (Kp * error_score)
+
+    if control_output > LARGE_CONTROL_OUTPUT:
+        return "LEFT", "SLOW"
+
+    elif control_output < -LARGE_CONTROL_OUTPUT:
+        return "RIGHT", "SLOW"
+
+    elif control_output > ERROR_DEADBAND:
+        if speed_mps >= HIGH_SPEED_MPS:
+            return "LEFT", "SLOW"
         else:
-            steering = "STRAIGHT"
-            speed_action = "SLOW"
+            return "LEFT", "ACCELERATE"
 
-    if e_stop:
-        if obstacle_distance_m <= DANGER_OBSTACLE_M:
-            steering = "STRAIGHT"
-            speed_action = "STOP"
+    elif control_output < -ERROR_DEADBAND:
+        if speed_mps >= HIGH_SPEED_MPS:
+            return "RIGHT", "SLOW"
+        else:
+            return "RIGHT", "ACCELERATE"
 
-    if heading_error_deg > LARGE_HEADING_DEG or lane_offset_m > LARGE_OFFSET_M:
-        steering = "LEFT"
-        speed_action = "ACCELERATE"
+    else:
+        return "STRAIGHT", "ACCELERATE"
 
-    if heading_error_deg < -LARGE_HEADING_DEG or lane_offset_m < -LARGE_OFFSET_M:
-        steering = "RIGHT"
-        speed_action = "ACCELERATE"
-
-    return steering, speed_action
+# SITUATION:            Expected steering:       Expected speed action:
+#sensor invalid              STRAIGHT                STOP
+#e-stop activated            STRAIGHT                STOP
+#obstacle very close, left clear, right blocked     LEFT                    SLOW
+#obstacle very close, right clear, left blocked     RIGHT                   SLOW
+#obstacle very close, both clear, heading/lane error suggests left correction     LEFT     SLOW
+#obstacle very close, both clear, heading/lane error suggests right correction    RIGHT    SLOW
+#obstacle very close, both clear, no significant heading/lane           STRAIGHT                STOP
+#obstacle moderately close, left clear, right blocked     LEFT                    SLOW
+#obstacle moderately close, right clear, left blocked     RIGHT                   SLOW
+#obstacle moderately close, both clear, heading/lane error suggests left correction     LEFT
